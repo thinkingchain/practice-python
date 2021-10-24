@@ -1,0 +1,146 @@
+import requests as req
+from bs4 import BeautifulSoup
+import pymongo
+import sys, threading
+
+sys.setrecursionlimit(10**7)
+threading.stack_size(2**27)
+
+timeout = 10
+
+bscClient = pymongo.MongoClient("mongodb://localhost:27017/")
+bscDB = bscClient["newcoins-test"]
+contractCol = bscDB["contracts"] 
+blockCol = bscDB["block"] 
+
+worker = blockCol.find_one({"worker":1})
+block = worker["block"]
+
+#本地代理
+proxies = {'http' : '127.0.0.1:7890','https' : '127.0.0.1:7890'}
+
+headers = {"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"}
+
+def bsc(block) :
+
+        print('block working:'+str(block))
+
+        hexBlock = hex(block)
+        url ="https://api.bscscan.com/api?module=proxy&action=eth_getBlockByNumber&tag="
+        url = url + str(hexBlock)
+        url = url + "&boolean=true&apikey=U1KNQYPX14RKRFDV3DHRHNV5WFGZ7V7UEU"
+
+
+        #print('url:'+url)
+
+        #res = req.get(url,proxies=proxies,headers=headers)
+        res = req.get(url,headers=headers,timeout=timeout)
+
+        json = res.json()
+        result = json['result']
+        transactions = result["transactions"]
+        print("transactions:"+str(len(transactions)))
+        index = 0
+        for  transaction in transactions:
+            index = index + 1
+            to = transaction["to"]
+            # print("index" +str(index) + " => to:"+to)
+            # to 为空，是创建智能合约
+            if not to :
+            
+                #交易hash
+                hash = transaction["hash"]
+                transactionUrl = "https://bscscan.com/tx/"
+                transactionUrl = transactionUrl + hash
+                print(transactionUrl)
+                
+                #获取合约
+                #transactionRes = req.get(transactionUrl,proxies=proxies,headers=headers)
+                transactionRes = req.get(transactionUrl,headers=headers,timeout=timeout)
+                #print(transactionRes.content)
+                transactionSoup = BeautifulSoup(transactionRes.content,"html.parser")
+                contractSpan = transactionSoup.find("span",id="spanToAdd")
+                #print("index" +str(index) + " => "+ hash +" => " +contract.getText())
+                
+                if contractSpan :
+                    #合约地址
+                    contract = contractSpan.getText()
+                    #print(str(index)+ "=>contract: => " +contract)
+                    
+                    contractUrl = "https://bscscan.com/token/"
+                    contractUrl = contractUrl + contract
+                    print("contractUrl:"+contractUrl)
+                    contractRes = req.get(contractUrl,headers=headers,timeout=timeout)
+                    contractSoup = BeautifulSoup(contractRes.content,"html.parser")
+                    
+                     # 发行总量
+                    supplyDiv = contractSoup.find("div", class_="col-md-8 font-weight-medium")
+                    supply = supplyDiv.find("span", class_="hash-tag text-truncate").getText()
+                    print("supply:"+supply)
+                    token = supplyDiv.find("b").getText()
+                    print("token:"+token)
+                    # 如果发行量是空，将跳过该合约，继续循环
+                    if not supply or supply == "0" :
+                        print("continue...")
+                        continue
+
+
+                    # 价格price
+                    price = ""
+                    contentPlaceHolder1_tr_valuepertoken = contractSoup.find(
+                        "div", id="ContentPlaceHolder1_tr_valuepertoken")
+
+                    if contentPlaceHolder1_tr_valuepertoken :
+                        priceSpan = contentPlaceHolder1_tr_valuepertoken.find(
+                            'span', class_='d-block').find(attrs={'data-toggle': 'tooltip'})
+                        price = priceSpan.getText()
+                    print("price:"+price)
+
+                    # 总市值
+                    marketCap = ""
+                    if contentPlaceHolder1_tr_valuepertoken :
+                        marketCapSpan = contentPlaceHolder1_tr_valuepertoken.find(
+                        'button', class_='u-label u-label--sm u-label--value u-label--text-dark u-label--secondary rounded')
+                        if marketCapSpan :
+                           marketCap = marketCapSpan.getText().strip()
+                    print("marketCap:"+marketCap)
+
+                   
+
+                    # Holders
+                    contentPlaceHolder1_tr_tokenHolders = contractSoup.find(
+                        "div", id="ContentPlaceHolder1_tr_tokenHolders")
+                    holders = contentPlaceHolder1_tr_tokenHolders.find(
+                        "div", class_="mr-3").getText().replace("addresses", "").strip()
+                    print("holders:"+holders)
+
+                    # Transfers
+                    #contentPlaceHolder1_trNoOfTxns = contractSoup.find( "div", id="ContentPlaceHolder1_trNoOfTxns")
+                    #transfers = contentPlaceHolder1_trNoOfTxns.find("span",id="totaltxns").getText()
+                    # print("transfers:"+transfers)
+
+                    # 网址
+                    officeSiteDiv = contractSoup.find(
+                        "div", id="ContentPlaceHolder1_tr_officialsite_1")
+                    officeSiteText = ""
+                    if officeSiteDiv:
+                        officeSiteText = officeSiteDiv.getText().replace("Official Site:", "").strip()
+                        print("officeSiteText:"+officeSiteText)
+
+
+                    bscContract = { "contract":contract,"hash":hash,"price": price, "marketCap": marketCap,"supply": supply,"token": token, "holders": holders,"site": officeSiteText}
+                    x = contractCol.insert_one(bscContract) 
+       
+        print('fnished:'+str(block))
+        y = blockCol.update({"worker":1}, {"worker":1,"block":block})
+        
+        block = block + 2
+        bsc(block)
+
+bsc(block)
+
+
+
+
+
+
